@@ -1,58 +1,54 @@
 name: Build APK
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   build:
-  runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04
 
-  ```
-  steps:
-  - name: Checkout Repository
-    uses: actions/checkout@v4
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-  - name: Set up Java 17
-    uses: actions/setup-java@v4
-    with:
-      distribution: temurin
-      java-version: '17'
+    - name: Set up Java 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
 
-  - name: Set up Python 3.11
-    uses: actions/setup-python@v5
-    with:
-      python-version: '3.11'
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
 
-  - name: Install Dependencies
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y \
-        git zip unzip autoconf automake libtool \
-        pkg-config zlib1g-dev libncurses5-dev \
-        libncursesw5-dev cmake libffi-dev libssl-dev
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git zip unzip autoconf automake libtool \
+          pkg-config zlib1g-dev libncurses5-dev \
+          libncursesw5-dev cmake libffi-dev libssl-dev \
+          ffmpeg libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev
 
-      python -m pip install --upgrade pip
-      pip install buildozer==1.5.0
-      pip install cython==0.29.36
+        python -m pip install --upgrade pip
+        pip install buildozer cython virtualenv
 
-  - name: Accept Android Licenses
-    run: |
-      mkdir -p ~/.android
-      touch ~/.android/repositories.cfg
+    - name: Accept Android Licenses
+      run: |
+        mkdir -p ~/.android
+        touch ~/.android/repositories.cfg
 
-  - name: Build APK
-    env:
-      ANDROID_ACCEPT_LICENSE: "True"
-    run: |
-      buildozer android debug
+    - name: Build APK
+      run: |
+        buildozer -v android debug --auto-accept-sdk-license
 
-  - name: List APK Files
-    run: |
-      find . -name "*.apk"
+    - name: List APK Files
+      run: |
+        find . -name "*.apk"
 
-  - name: Upload APK
-    uses: actions/upload-artifact@v4
-    with:
-      name: APK
-      path: bin/*.apk
-```
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: Piping-Tracker-APK
+        path: bin/*.apk
