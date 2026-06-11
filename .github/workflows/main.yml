@@ -4,11 +4,11 @@ on:
 workflow_dispatch:
 
 jobs:
-build:
-runs-on: ubuntu-22.04
+  build:
+  runs-on: ubuntu-22.04
 
-```
-steps:
+  ```
+  steps:
   - name: Checkout Repository
     uses: actions/checkout@v4
 
