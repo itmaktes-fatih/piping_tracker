@@ -1,5 +1,7 @@
-import sqlite3
 import os
+os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'  # Windows için en kararlı ekran kartı modu
+
+import sqlite3
 import csv
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -11,6 +13,7 @@ from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.popup import Popup
 from kivy.utils import get_color_from_hex
 from kivy.graphics import Color, RoundedRectangle
+from kivy.properties import ListProperty
 
 # --- ENDÜSTRİYEL RENK PALETİ ---
 ARKA_PLAN = get_color_from_hex("#111625")       
@@ -23,7 +26,6 @@ BUTON_KIRMIZI = get_color_from_hex("#C0392B")
 BUTON_GRI = get_color_from_hex("#7F8C8D")
 
 def get_db_path():
-    # Android çökmesini engellemek için en güvenli yöntem: App.get_running_app().user_data_dir
     try:
         app = App.get_running_app()
         if app and app.user_data_dir:
@@ -93,13 +95,17 @@ def veritabanini_hazirla():
     conn.commit()
     conn.close()
 
+# Kivy Tasarım Moduyla Tam Uyumlu Renkli Kart Sınıfı
 class RenkliKart(BoxLayout):
-    def __init__(self, bg_color, radius=[8], **kwargs):
+    bg_color = ListProperty([1, 1, 1, 1])
+
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
         with self.canvas.before:
-            Color(*bg_color)
-            self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=radius)
+            Color(rgba=self.bg_color)
+            self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[8])
         self.bind(pos=self.guncelle, size=self.guncelle)
+
     def guncelle(self, *args):
         self.rect.pos = self.pos
         self.rect.size = self.size
@@ -119,9 +125,6 @@ class MainMenuScreen(Screen):
         popup = Popup(title='Yeni Proje Kaydı', content=layout, size_hint=(0.8, 0.4))
         btn_kaydet.bind(on_press=lambda x: self.proje_kaydet(popup))
         popup.open()
-
-    def presidential_check(self):
-        veritabanini_hazirla()
 
     def proje_kaydet(self, popup):
         p_adi = self.p_input.text.strip()
