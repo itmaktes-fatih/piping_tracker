@@ -706,4 +706,25 @@ class PipingQAQCApp(App):
         return sm
 
 if __name__ == "__main__":
-    PipingQAQCApp().run()
+    try:
+        PipingQAQCApp().run()
+    except Exception as e:
+        # Eğer uygulama telefonda çökerse, hemen kapanma! 
+        # Hatanın ne olduğunu ekranda bir Popup (Açılır pencere) olarak göster.
+        import traceback
+        from kivy.uix.popup import Popup
+        from kivy.uix.textinput import TextInput
+        
+        # Hata detayını metne döküyoruz
+        hata_mesaji = traceback.format_exc()
+        
+        # Hata mesajını kopyalayabilmen için bir ekran tasarlıyoruz
+        kutu = TextInput(text=hata_mesaji, readonly=True, font_size='14sp')
+        pencere = Popup(title='⚠️ KRİTİK UYGULAMA HATASI (LÜTFEN EKRAN GÖRÜNTÜSÜ ALIN)', 
+                        content=kutu, 
+                        size_hint=(0.9, 0.9))
+        pencere.open()
+        
+        # Kivy'nin ana döngüsü koptuğu için acil durum arayüzünü canlı tutuyoruz
+        from kivy.base import runTouchApp
+        runTouchApp(pencere)
