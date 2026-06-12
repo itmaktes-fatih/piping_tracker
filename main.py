@@ -1,6 +1,5 @@
 import os
 os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'  # Windows için en kararlı ekran kartı modu
-
 import sqlite3
 import csv
 from kivy.app import App
@@ -101,14 +100,27 @@ class RenkliKart(BoxLayout):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+
         with self.canvas.before:
-            Color(rgba=self.bg_color)
-            self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[8])
-        self.bind(pos=self.guncelle, size=self.guncelle)
+            self.color_instruction = Color(*self.bg_color)
+            self.rect = RoundedRectangle(
+                pos=self.pos,
+                size=self.size,
+                radius=[8]
+            )
+
+        self.bind(
+            pos=self.guncelle,
+            size=self.guncelle,
+            bg_color=self.renk_guncelle
+        )
 
     def guncelle(self, *args):
         self.rect.pos = self.pos
         self.rect.size = self.size
+
+    def renk_guncelle(self, *args):
+        self.color_instruction.rgba = self.bg_color
 
 # --- 1. EKRAN: ANA PANEL ---
 class MainMenuScreen(Screen):
