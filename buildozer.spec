@@ -103,7 +103,7 @@ fullscreen = 0
 
 # (list) Permissions
 # (See https://python-for-android.readthedocs.io/en/latest/buildoptions.html for all the supported syntaxes and properties)
-android.permissions = INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, MOUNT_UNMOUNT_FILESYSTEMS
+android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,MOUNT_UNMOUNT_FILESYSTEMS
 
 # (list) features (adds uses-feature -tags to manifest)
 #android.features = android.hardware.usb.host
