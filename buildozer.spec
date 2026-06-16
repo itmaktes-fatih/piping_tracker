@@ -109,7 +109,7 @@ android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,MOUN
 #android.features = android.hardware.usb.host
 
 # (int) Target Android API, should be as high as possible.
-android.api = 34
+android.api = 33
 
 # Hemen altına şu ayarı ekleyin veya bulun:
 android.uses_cleartext_traffic = 1
