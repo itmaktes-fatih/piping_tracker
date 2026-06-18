@@ -1,11 +1,11 @@
 import os
-# Windows test ortamı için en kararlı ekran kartı arka plan motoru
+# Windows testleri için kararlı ekran kartı modu (Android'de otomatik göz ardı edilir)
 os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'  
 
+import sqlite3
 import csv
-import traceback
-import requests  # Firebase REST API için standart ve APK uyumlu kütüphane
-
+import json
+import requests
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
@@ -17,12 +17,13 @@ from kivy.uix.popup import Popup
 from kivy.utils import get_color_from_hex
 from kivy.graphics import Color, RoundedRectangle
 from kivy.properties import ListProperty
-from kivy.lang import Builder
 
-# --- GÜNCEL FIREBASE BAĞLANTI AYARI ---
-FIREBASE_URL = "https://piping-tracker-default-rtdb.europe-west1.firebasedatabase.app/"
+# --- FIREBASE REST API AYARLARI ---
+# Kendi Firebase Web API Key ve Realtime DB URL'nizi buraya yazın
+FIREBASE_API_KEY = "YOUR_FIREBASE_API_KEY"
+FIREBASE_DB_URL = "https://YOUR_PROJECT_ID.firebaseio.com"
 
-# --- ENDÜSTRİYEL QA/QC RENK PALETİ ---
+# --- ENDÜSTRİYEL RENK PALETİ ---
 ARKA_PLAN = get_color_from_hex("#111625")       
 ISG_SARISI = get_color_from_hex("#F39C12")      
 KART_RENGI = get_color_from_hex("#1A2238")      
@@ -32,7 +33,76 @@ BUTON_MAVI = get_color_from_hex("#2980B9")
 BUTON_KIRMIZI = get_color_from_hex("#C0392B")    
 BUTON_GRI = get_color_from_hex("#7F8C8D")
 
-# Kivy Tasarım Moduyla Tam Uyumlu Renkli Kart Sınıfı
+def get_db_path():
+    try:
+        app = App.get_running_app()
+        if app and app.user_data_dir:
+            return os.path.join(app.user_data_dir, "piping_qaqc_v3.db")
+    except:
+        pass
+    return "piping_qaqc_v3.db"
+
+def veritabanini_hazirla():
+    conn = sqlite3.connect(get_db_path())
+    cursor = conn.cursor()
+    
+    # 1. Ana Projeler Tablosu
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ana_projeler (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proje_adi TEXT UNIQUE,
+        durum TEXT DEFAULT 'Aktif'
+    )
+    """)
+    
+    # 2. Hatlar Tablosu (Proje Kırılımlı)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS projeler (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proje_id INTEGER,
+        project_name TEXT,
+        line_no TEXT UNIQUE,
+        iso_no TEXT,
+        rev TEXT,
+        material_grade TEXT,
+        wps_no TEXT,
+        fitup_status TEXT,
+        ndt_result TEXT,
+        punch_status TEXT,
+        FOREIGN KEY(proje_id) REFERENCES ana_projeler(id) ON DELETE CASCADE
+    )
+    """)
+    
+    # 3. Weld Logs
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS weld_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        line_no TEXT,
+        weld_no TEXT,
+        weld_type TEXT,
+        fitup_date TEXT,
+        weld_date TEXT,
+        test_pressure TEXT,
+        spec_no TEXT,
+        FOREIGN KEY(line_no) REFERENCES projeler(line_no) ON DELETE CASCADE
+    )
+    """)
+    
+    # 4. Punch Logs
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS punch_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        line_no TEXT,
+        punch_type TEXT,
+        description TEXT,
+        punch_status TEXT,
+        FOREIGN KEY(line_no) REFERENCES projeler(line_no) ON DELETE CASCADE
+    )
+    """)
+    
+    conn.commit()
+    conn.close()
+
 class RenkliKart(BoxLayout):
     bg_color = ListProperty([1, 1, 1, 1])
 
@@ -41,7 +111,6 @@ class RenkliKart(BoxLayout):
         with self.canvas.before:
             self.color_instruction = Color(*self.bg_color)
             self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[8])
-
         self.bind(pos=self.guncelle, size=self.guncelle, bg_color=self.renk_guncelle)
 
     def guncelle(self, *args):
@@ -51,11 +120,126 @@ class RenkliKart(BoxLayout):
     def renk_guncelle(self, *args):
         self.color_instruction.rgba = self.bg_color
 
+
+# --- 🔥 YENİ EKRAN: FİREBASE GİRİŞ SİSTEMİ ---
+class LoginScreen(Screen):
+    def bildirim_goster(self, mesaj):
+        self.ids.lbl_login_status.text = mesaj
+
+    def giris_yap(self):
+        email = self.ids.inp_email.text.strip()
+        password = self.ids.inp_password.text.strip()
+        
+        if not email or not password:
+            self.bildirim_goster("⚠️ E-posta ve şifre boş bırakılamaz!")
+            return
+            
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_API_KEY}"
+        payload = {"email": email, "password": password, "returnSecureToken": True}
+        
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            res_data = response.json()
+            
+            if response.status_code == 200:
+                local_id = res_data["localId"]
+                self.bildirim_goster("✅ Giriş Başarılı! Rol kontrol ediliyor...")
+                self.rol_kontrol_et(local_id)
+            else:
+                hata = res_data.get("error", {}).get("message", "Giriş Başarısız")
+                self.bildirim_goster(f"❌ Hata: {hata}")
+        except Exception as e:
+            self.bildirim_goster("📡 Sunucu bağlantı hatası!")
+
+    def rol_kontrol_et(self, local_id):
+        # Kullanıcının Admin olup olmadığını kontrol etmek için Realtime DB'ye bakıyoruz
+        url = f"{FIREBASE_DB_URL}/users/{local_id}.json"
+        try:
+            response = requests.get(url, timeout=10)
+            user_data = response.json()
+            
+            app = App.get_running_app()
+            if user_data and user_data.get("role") == "admin":
+                app.is_admin = True
+                self.bildirim_goster("👑 Admin olarak giriş yapıldı.")
+            else:
+                app.is_admin = False
+                self.bildirim_goster("👷 Enspektör olarak giriş yapıldı.")
+                
+            self.manager.current = 'ana_menu'
+        except:
+            # DB boşsa veya hata alındıysa varsayılan kullanıcı olarak paneli aç
+            App.get_running_app().is_admin = False
+            self.manager.current = 'ana_menu'
+
+    def admin_kullanici_ekleme_popup(self):
+        # Sadece admin yetkisi olanların yeni kullanıcı açabilmesi için kontrol
+        if not App.get_running_app().is_admin:
+            self.bildirim_goster("🚫 Bu işlem için ADMIN yetkisi gerekiyor!")
+            return
+
+        layout = BoxLayout(orientation='vertical', padding=15, spacing=10)
+        self.new_email = TextInput(hint_text="Yeni Personel E-Posta", multiline=False)
+        self.new_pass = TextInput(hint_text="Şifre (Min. 6 Karakter)", password=True, multiline=False)
+        
+        # Rol Seçimi İçin Basit Yönetim (admin mi yoksa field inspector mı?)
+        self.new_role = TextInput(hint_text="Rolü Yazın (admin veya inspector)", multiline=False, text="inspector")
+        
+        btn_kaydet = Button(text="KULLANICIYI SİSTEME EKLE", background_normal='', background_color=BUTON_YESIL, bold=True)
+        layout.add_widget(self.new_email)
+        layout.add_widget(self.new_pass)
+        layout.add_widget(self.new_role)
+        layout.add_widget(btn_kaydet)
+        
+        popup = Popup(title='Yönetici Paneli - Yeni Personel Tanımlama', content=layout, size_hint=(0.85, 0.55))
+        btn_kaydet.bind(on_press=lambda x: self.kullanici_olustur(popup))
+        popup.open()
+
+    def kullanici_olustur(self, popup):
+        email = self.new_email.text.strip()
+        password = self.new_pass.text.strip()
+        role = self.new_role.text.strip().lower()
+        
+        if not email or not password:
+            return
+            
+        # 1. Firebase Authentication'a yeni kullanıcı kaydı yapıyoruz
+        auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={FIREBASE_API_KEY}"
+        payload = {"email": email, "password": password, "returnSecureToken": True}
+        
+        try:
+            auth_response = requests.post(auth_url, json=payload, timeout=10)
+            auth_data = auth_response.json()
+            
+            if auth_response.status_code == 200:
+                local_id = auth_data["localId"]
+                # 2. Kullanıcı kaydı başarılıysa Rol yetkisini Realtime Database'e yazıyoruz
+                db_url = f"{FIREBASE_DB_URL}/users/{local_id}.json"
+                user_payload = {"email": email, "role": role}
+                requests.put(db_url, json=user_payload, timeout=10)
+                
+                self.bildirim_goster(f"🎉 {email} başarıyla sisteme eklendi.")
+            else:
+                hata = auth_data.get("error", {}).get("message", "Kayıt Başarısız")
+                self.bildirim_goster(f"❌ Yetkilendirme Hatası: {hata}")
+        except:
+            self.bildirim_goster("📡 Ağ hatası, kullanıcı eklenemedi.")
+        popup.dismiss()
+
+
 # --- 1. EKRAN: ANA PANEL ---
 class MainMenuScreen(Screen):
+    def on_enter(self):
+        veritabanini_hazirla()
+        # Admin değilse kullanıcı ekleme butonunu ana menüde de kısıtlayabiliriz
+        if App.get_running_app().is_admin:
+            self.ids.lbl_user_info.text = "Giriş Yapan: Kaptan (ADMIN)"
+        else:
+            self.ids.lbl_user_info.text = "Giriş Yapan: Saha Enspektörü"
+
     def yeni_proje_popup(self):
         layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        self.p_input = TextInput(hint_text="Proje Adı Girin (Örn: Rafineri)", multiline=False)
+        self.p_input = TextInput(hint_text="Proje Adı Girin (Örn: Rafineri Tank Sahası)", multiline=False)
         btn_kaydet = Button(text="KAYDET", background_normal='', background_color=BUTON_YESIL, bold=True)
         layout.add_widget(self.p_input)
         layout.add_widget(btn_kaydet)
@@ -67,40 +251,40 @@ class MainMenuScreen(Screen):
     def proje_kaydet(self, popup):
         p_adi = self.p_input.text.strip()
         if p_adi:
+            conn = sqlite3.connect(get_db_path())
+            cursor = conn.cursor()
             try:
-                # Proje adını Firebase'e uygun bir key haline getirmek için temizliyoruz
-                safe_key = p_adi.replace(".", "_").replace("$", "_").replace("#", "_")
-                data = {"proje_adi": p_adi, "durum": "Aktif"}
-                requests.put(f"{FIREBASE_URL}ana_projeler/{safe_key}.json", json=data)
-            except Exception as e:
-                print("Firebase Hata:", e)
+                cursor.execute("INSERT INTO ana_projeler (proje_adi) VALUES (?)", (p_adi,))
+                conn.commit()
+            except:
+                pass
+            conn.close()
         popup.dismiss()
 
 # --- 2. EKRAN: PROJE LİSTE EKRANI ---
 class ProjectListScreen(Screen):
-    mod = "Aktif"
-
-    def on_enter(self):
-        self.liste_yukle(self.mod)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.mod = "Aktif"
 
     def liste_yukle(self, mod):
         self.mod = mod 
         self.ids.lbl_baslik.text = f"{mod.upper()} PROJELER"
         self.ids.liste_container.clear_widgets()
         
-        try:
-            response = requests.get(f"{FIREBASE_URL}ana_projeler.json")
-            projeler = response.json() or {}
-            
-            for key, val in projeler.items():
-                if val.get("durum") == mod:
-                    row = BoxLayout(orientation='horizontal', size_hint_y=None, height=50, spacing=5)
-                    btn = Button(text=val.get("proje_adi"), background_normal='', background_color=KART_RENGI, halign='left', valign='middle')
-                    btn.bind(on_press=lambda x, pid=key, pname=val.get("proje_adi"): self.proje_sec(pid, pname))
-                    row.add_widget(btn)
-                    self.ids.liste_container.add_widget(row)
-        except Exception as e:
-            self.ids.lbl_baslik.text = "Bağlantı Hatası!"
+        veritabanini_hazirla()
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, proje_adi FROM ana_projeler WHERE durum = ?", (mod,))
+        projeler = cursor.fetchall()
+        conn.close()
+        
+        for p_id, p_adi in projeler:
+            row = BoxLayout(orientation='horizontal', size_hint_y=None, height=50, spacing=5)
+            btn = Button(text=p_adi, background_normal='', background_color=KART_RENGI, halign='left', valign='middle')
+            btn.bind(on_press=lambda x, pid=p_id, pname=p_adi: self.proje_sec(pid, pname))
+            row.add_widget(btn)
+            self.ids.liste_container.add_widget(row)
 
     def proje_sec(self, pid, pname):
         app = App.get_running_app()
@@ -115,15 +299,610 @@ class HatYonetimScreen(Screen):
         self.ids.lbl_proje_ust.text = f"PROJE: {app.secili_proje_adi}"
         self.hat_listele()
         self.proje_durum_kontrol()
-        self.weld_ve_punch_listele()
+
+    def p_durum_getir(self, pid):
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT durum FROM ana_projeler WHERE id = ?", (pid,))
+        durum = cursor.fetchone()
+        conn.close()
+        return durum
 
     def proje_durum_kontrol(self):
         app = App.get_running_app()
+        durum = self.p_durum_getir(app.secili_proje_id)
+        if durum and durum[0] == 'Biten':
+            self.ids.btn_proje_bitir.text = "PROJEYİ AKTİFE AL"
+            self.ids.btn_proje_bitir.background_color = ISG_SARISI
+        else:
+            self.ids.btn_proje_bitir.text = "PROJEYİ TAMAMLANDI YAP"
+            self.ids.btn_proje_bitir.background_color = BUTON_KIRMIZI
+
+    def proje_bitir_click(self):
+        app = App.get_running_app()
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        if self.ids.btn_proje_bitir.text == "PROJEYİ TAMAMLANDI YAP":
+            cursor.execute("UPDATE ana_projeler SET durum = 'Biten' WHERE id = ?", (app.secili_proje_id,))
+        else:
+            cursor.execute("UPDATE ana_projeler SET durum = 'Aktif' WHERE id = ?", (app.secili_proje_id,))
+        conn.commit()
+        conn.close()
+        self.manager.current = 'ana_menu'
+
+    def hat_kaydet_click(self):
+        app = App.get_running_app()
+        lno = self.ids.input_lno.text.strip()
+        if not lno: return
+        
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT OR REPLACE INTO projeler (proje_id, project_name, line_no, iso_no, rev, material_grade, wps_no, fitup_status, ndt_result, punch_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (app.secili_proje_id, self.ids.input_pname.text, lno, self.ids.input_isono.text, self.ids.input_rev.text, self.ids.input_mat.text, self.ids.input_wps.text, self.ids.input_fitup.text, self.ids.input_ndt.text, self.ids.input_pstatus.text))
+        conn.commit()
+        conn.close()
+        app.secili_line_no = lno
+        self.hat_listele()
+        self.form_temizle()
+
+    def hat_sil(self, line_no):
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM projeler WHERE line_no = ?", (line_no,))
+        conn.commit()
+        conn.close()
+        if App.get_running_app().secili_line_no == line_no:
+            App.get_running_app().secili_line_no = None
+            self.ids.lbl_secili_hat_ust.text = "⚠️ SEÇİLİ HAT MENÜSÜ (TIKLA)"
+            self.ids.lbl_weld_liste.text = "Lütfen yukarıdan bir hat seçip işlem yapın..."
+        self.hat_listele()
+
+    def hat_duzenle(self, line_no):
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM projeler WHERE line_no = ?", (line_no,))
+        s = cursor.fetchone()
+        conn.close()
+        if s:
+            self.ids.input_pname.text = s[2] or ""
+            self.ids.input_lno.text = s[3] or ""
+            self.ids.input_isono.text = s[4] or ""
+            self.ids.input_rev.text = s[5] or ""
+            self.ids.input_mat.text = s[6] or ""
+            self.ids.input_wps.text = s[7] or ""
+            self.ids.input_fitup.text = s[8] or ""
+            self.ids.input_ndt.text = s[9] or ""
+            self.ids.input_pstatus.text = s[10] or ""
+
+    def hat_listele(self):
+        app = App.get_running_app()
+        self.ids.hat_list_container.clear_widgets()
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT line_no, iso_no FROM projeler WHERE proje_id = ?", (app.secili_proje_id,))
+        satirlar = cursor.fetchall()
+        conn.close()
+        
+        for s in satirlar:
+            row = BoxLayout(orientation='horizontal', size_hint_y=None, height=45, spacing=5)
+            btn_sec = Button(text=f"📍 {s[0]} (Iso: {s[1]})", background_normal='', background_color=KART_RENGI, halign='left')
+            btn_sec.bind(on_press=lambda x, lno=s[0]: self.hat_hizli_sec(lno))
+            
+            btn_edit = Button(text="DÜZENLE", size_hint_x=0.2, background_normal='', background_color=BUTON_MAVI)
+            btn_edit.bind(on_press=lambda x, lno=s[0]: self.hat_duzenle(lno))
+            
+            btn_del = Button(text="SİL", size_hint_x=0.15, background_normal='', background_color=BUTON_KIRMIZI)
+            btn_del.bind(on_press=lambda x, lno=s[0]: self.hat_sil(lno))
+            
+            row.add_widget(btn_sec)
+            row.add_widget(btn_edit)
+            row.add_widget(btn_del)
+            self.ids.hat_list_container.add_widget(row)
+
+    def hat_hizli_sec(self, lno):
+        App.get_running_app().secili_line_no = lno
+        self.ids.lbl_secili_hat_ust.text = f"Seçili Hat: {lno}"
+        self.weld_ve_punch_listele()
+
+    def hat_secim_popup_ac(self):
+        app = App.get_running_app()
+        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        scroll = ScrollView()
+        list_box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=5)
+        list_box.bind(minimum_height=list_box.setter('height'))
+        
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT line_no FROM projeler WHERE proje_id = ?", (app.secili_proje_id,))
+        hatlar = cursor.fetchall()
+        conn.close()
+        
+        popup = Popup(title='Sistemde Kayıtlı Hatlar', content=layout, size_hint=(0.9, 0.7))
+        
+        for h in hatlar:
+            b = Button(text=h[0], size_hint_y=None, height=45, background_normal='', background_color=KART_RENGI)
+            b.bind(on_press=lambda x, lno=h[0]: [self.hat_hizli_sec(lno), popup.dismiss()])
+            list_box.add_widget(b)
+            
+        scroll.add_widget(list_box)
+        layout.add_widget(scroll)
+        popup.open()
+
+    def hat_arama_popup_ac(self):
+        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        inp_ara = TextInput(hint_text="Aranacak Hat No Yazın...", multiline=False)
+        scroll = ScrollView()
+        sonuc_box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=5)
+        sonuc_box.bind(minimum_height=sonuc_box.setter('height'))
+        
+        layout.add_widget(inp_ara)
+        layout.add_widget(scroll)
+        scroll.add_widget(sonuc_box)
+        
+        popup = Popup(title='Gelişmiş Hat Arama', content=layout, size_hint=(0.9, 0.8))
+        
+        def arama_yap(*args):
+            sonuc_box.clear_widgets()
+            txt = inp_ara.text.strip()
+            if not txt: return
+            conn = sqlite3.connect(get_db_path())
+            cursor = conn.cursor()
+            cursor.execute("SELECT line_no FROM projeler WHERE proje_id = ? AND line_no LIKE ?", (App.get_running_app().secili_proje_id, f"%{txt}%"))
+            res = cursor.fetchall()
+            conn.close()
+            for r in res:
+                b = Button(text=r[0], size_hint_y=None, height=45, background_normal='', background_color=KART_RENGI)
+                b.bind(on_press=lambda x, lno=r[0]: [self.hat_hizli_sec(lno), popup.dismiss()])
+                sonuc_box.add_widget(b)
+                
+        inp_ara.bind(text=arama_yap)
+        popup.open()
+
+    def weld_ekle_click(self):
+        app = App.get_running_app()
+        if not app.secili_line_no or not self.ids.input_wno.text: return
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO weld_logs (line_no, weld_no, weld_type, fitup_date, weld_date, test_pressure, spec_no) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (app.secili_line_no, self.ids.input_wno.text, self.ids.input_wtype.text, self.ids.input_fdate.text, self.ids.input_wdate.text, self.ids.input_tpress.text, self.ids.input_spec.text))
+        conn.commit()
+        conn.close()
+        self.weld_ve_punch_listele()
+        self.ids.input_wno.text = ""
+
+    def punch_ekle_click(self):
+        app = App.get_running_app()
+        if not app.secili_line_no or not self.ids.input_ptype.text: return
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO punch_logs (line_no, punch_type, description, punch_status) VALUES (?, ?, ?, 'Open')", (app.secili_line_no, self.ids.input_ptype.text, self.ids.input_pdesc.text))
+        conn.commit()
+        conn.close()
+        self.weld_ve_punch_listele()
+        self.ids.input_ptype.text = ""
+        self.ids.input_pdesc.text = ""
+
+    def punch_kapat_click(self):
+        p_id = self.ids.input_punch_kapat_id.text.strip()
+        if not p_id: return
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("UPDATE punch_logs SET punch_status = 'Kapalı' WHERE id = ?", (p_id,))
+        conn.commit()
+        conn.close()
+        self.ids.input_punch_kapat_id.text = ""
+        self.weld_ve_punch_listele()
+
+    def weld_ve_punch_listele(self):
+        app = App.get_running_app()
+        if not app.secili_line_no: return
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT weld_no, weld_type, weld_date FROM weld_logs WHERE line_no = ?", (app.secili_line_no,))
+        kaynaklar = cursor.fetchall()
+        cursor.execute("SELECT id, punch_type, description, punch_status FROM punch_logs WHERE line_no = ?", (app.secili_line_no,))
+        punchlar = cursor.fetchall()
+        conn.close()
+        
+        rapor = f"⚙️ HAT LOG DETAYI: {app.secili_line_no}\n\n[ WELD LOGS ]\n"
+        for k in kaynaklar: rapor += f"• W-No: {k[0]} ({k[1]}) | Tarih: {k[2]}\n"
+        rapor += "\n[ PUNCH LIST ]\n"
+        for p in punchlar: rapor += f"• ID: {p[0]} | Tip: {p[1]} | [{p[3]}] - Detay: {p[2]}\n"
+        self.ids.lbl_weld_liste.text = rapor
+
+    def form_temizle(self):
+        self.ids.input_pname.text = ""
+        self.ids.input_lno.text = ""
+        self.ids.input_isono.text = ""
+        self.ids.input_rev.text = ""
+        self.ids.input_mat.text = ""
+        self.ids.input_wps.text = ""
+        self.ids.input_fitup.text = ""
+        self.ids.input_ndt.text = ""
+        self.ids.input_pstatus.text = ""
+
+    def global_csv_cikti_al(self):
+        app = App.get_running_app()
+        conn = sqlite3.connect(get_db_path())
+        cursor = conn.cursor()
         try:
-            res = requests.get(f"{FIREBASE_URL}ana_projeler/{app.secili_proje_id}.json").json()
-            if res and res.get("durum") == 'Biten':
-                self.ids.btn_proje_bitir.text = "PROJEYİ AKTİFE AL"
-                self.ids.btn_proje_bitir.background_color = ISG_SARISI
-            else:
-                self.ids.btn_proje_bitir.text = "PROJEYİ TAMAMLANDI YAP"
-                self.ids.btn_proje_bitir.background
+            klasor = '/sdcard/Download' if os.path.exists('/sdcard/Download') else '.'
+            dosya_yolu = os.path.join(klasor, f'{app.secili_proje_adi}_Santiye_Raporu.csv')
+            
+            with open(dosya_yolu, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow([f"=== {app.secili_proje_adi} BORU HATLARI LISTESI ==="])
+                writer.writerow(["ID", "ProjeID", "Project Name", "Line No", "Iso No", "Rev", "Material", "WPS", "FitUp", "NDT", "Punch"])
+                cursor.execute("SELECT * FROM projeler WHERE proje_id = ?", (app.secili_proje_id,))
+                writer.writerows(cursor.fetchall())
+                
+            self.ids.lbl_proje_ust.text = "Rapor İndirilenler Klasörüne Alındı!"
+        except Exception as e:
+            self.ids.lbl_proje_ust.text = f"Hata: {str(e)}"
+        finally:
+            conn.close()
+
+
+# --- KIVY DESIGN STRING (KV) ---
+from kivy.lang import Builder
+Builder.load_string("""
+<LoginScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: 40
+        spacing: 15
+        canvas.before:
+            Color:
+                rgba: 17/255, 22/255, 37/255, 1
+            Rectangle:
+                pos: self.pos
+                size: self.size
+        
+        Label:
+            text: "PIPING QA/QC PORTAL"
+            font_size: '26sp'
+            bold: True
+            color: 243/255, 156/255, 18/255, 1
+            size_hint_y: 0.25
+
+        TextInput:
+            id: inp_email
+            hint_text: "E-Posta Adresi"
+            multiline: False
+            size_hint_y: 0.12
+            font_size: '16sp'
+            padding: [10, 10, 10, 10]
+
+        TextInput:
+            id: inp_password
+            hint_text: "Şifre"
+            password: True
+            multiline: False
+            size_hint_y: 0.12
+            font_size: '16sp'
+            padding: [10, 10, 10, 10]
+
+        Label:
+            id: lbl_login_status
+            text: "Lütfen bilgilerinizi girerek sisteme bağlanın."
+            color: 236/255, 240/255, 241/255, 1
+            size_hint_y: 0.1
+            font_size: '13sp'
+
+        Button:
+            text: "🚀 SİSTEME GİRİŞ YAP"
+            background_normal: ''
+            background_color: 41/255, 128/255, 185/255, 1
+            bold: True
+            font_size: '16sp'
+            size_hint_y: 0.15
+            on_press: root.giris_yap()
+
+        Button:
+            text: "⚙️ YÖNETİCİ: PERSONEL EKLE"
+            background_normal: ''
+            background_color: 39/255, 174/255, 96/255, 1
+            bold: True
+            size_hint_y: 0.12
+            on_press: root.admin_kullanici_ekleme_popup()
+
+<MainMenuScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: 30
+        spacing: 20
+        Label:
+            text: "PIPING QA/QC MÜHENDİSLİK"
+            font_size: '22sp'
+            bold: True
+            color: 243/255, 156/255, 18/255, 1
+            size_hint_y: 0.15
+        Label:
+            id: lbl_user_info
+            text: "Giriş Yapan: Saha Enspektörü"
+            font_size: '14sp'
+            color: 127/255, 140/255, 141/255, 1
+            size_hint_y: 0.05
+        Button:
+            text: "➕ YENİ PROJE KAYIT"
+            background_normal: ''
+            background_color: 39/255, 174/255, 96/255, 1
+            bold: True
+            on_press: root.yeni_proje_popup()
+        Button:
+            text: "🔄 AKTİF PROJELER"
+            background_normal: ''
+            background_color: 41/255, 128/255, 185/255, 1
+            bold: True
+            on_press: 
+                app.root.current = 'proje_liste'
+                app.root.get_screen('proje_liste').liste_yukle('Aktif')
+        Button:
+            text: "✅ BİTEN PROJELER (ARŞİV)"
+            background_normal: ''
+            background_color: 127/255, 140/255, 141/255, 1
+            bold: True
+            on_press: 
+                app.root.current = 'proje_liste'
+                app.root.get_screen('proje_liste').liste_yukle('Biten')
+        Button:
+            text: "🔒 ÇIKIŞ YAP"
+            background_normal: ''
+            background_color: 192/255, 41/255, 43/255, 1
+            bold: True
+            size_hint_y: 0.15
+            on_press: app.root.current = 'login'
+
+<ProjectListScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: 15
+        spacing: 10
+        BoxLayout:
+            orientation: 'horizontal'
+            size_hint_y: 0.08
+            Button:
+                text: "⬅ GERİ"
+                size_hint_x: 0.2
+                on_press: app.root.current = 'ana_menu'
+            Label:
+                id: lbl_baslik
+                text: "PROJELER"
+                bold: True
+                font_size: '16sp'
+        ScrollView:
+            BoxLayout:
+                id: liste_container
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: 5
+
+<HatYonetimScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: 10
+        spacing: 8
+        
+        BoxLayout:
+            orientation: 'horizontal'
+            size_hint_y: 0.07
+            spacing: 5
+            Button:
+                text: "🏠 ANA"
+                size_hint_x: 0.2
+                on_press: app.root.current = 'ana_menu'
+            Label:
+                id: lbl_proje_ust
+                text: "PROJE BAŞLIĞI"
+                bold: True
+                color: 243/255, 156/255, 18/255, 1
+            Button:
+                id: btn_proje_bitir
+                text: "PROJEYİ BİTİR"
+                size_hint_x: 0.35
+                background_normal: ''
+                bold: True
+                on_press: root.proje_bitir_click()
+
+        BoxLayout:
+            orientation: 'horizontal'
+            size_hint_y: 0.06
+            spacing: 5
+            Button:
+                id: lbl_secili_hat_ust
+                text: "⚠️ SEÇİLİ HAT MENÜSÜ (TIKLA)"
+                background_normal: ''
+                background_color: 44/255, 62/255, 80/255, 1
+                bold: True
+                on_press: root.hat_secim_popup_ac()
+            Button:
+                text: "🔍 HAT ARA"
+                size_hint_x: 0.25
+                background_normal: ''
+                background_color: 243/255, 156/255, 18/255, 1
+                color: 0,0,0,1
+                bold: True
+                on_press: root.hat_arama_popup_ac()
+
+        BoxLayout:
+            orientation: 'vertical'
+            spacing: 5
+            
+            RenkliKart:
+                bg_color: 26/255, 34/255, 56/255, 1
+                orientation: 'vertical'
+                padding: 6
+                spacing: 4
+                size_hint_y: 0.40
+                TextInput:
+                    id: input_pname
+                    hint_text: "Sub-Project Name / Sistem"
+                TextInput:
+                    id: input_lno
+                    hint_text: "Line No (Zorunlu)"
+                TextInput:
+                    id: input_isono
+                    hint_text: "Iso No"
+                TextInput:
+                    id: input_rev
+                    hint_text: "Revizyon"
+                TextInput:
+                    id: input_mat
+                    hint_text: "Material Grade"
+                TextInput:
+                    id: input_wps
+                    hint_text: "WPS No"
+                TextInput:
+                    id: input_fitup
+                    hint_text: "FitUp Status"
+                TextInput:
+                    id: input_ndt
+                    hint_text: "NDT Result"
+                TextInput:
+                    id: input_pstatus
+                    hint_text: "Punch Status"
+            
+            BoxLayout:
+                orientation: 'horizontal'
+                size_hint_y: 0.06
+                spacing: 5
+                Button:
+                    text: "💾 HATTI KAYDET / GÜNCELLE"
+                    background_normal: ''
+                    background_color: 39/255, 174/255, 96/255, 1
+                    bold: True
+                    on_press: root.hat_kaydet_click()
+                Button:
+                    text: "📊 CSV"
+                    size_hint_x: 0.2
+                    background_normal: ''
+                    background_color: 41/255, 128/255, 185/255, 1
+                    bold: True
+                    on_press: root.global_csv_cikti_al()
+
+            ScrollView:
+                size_hint_y: 0.24
+                BoxLayout:
+                    id: hat_list_container
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: self.minimum_height
+                    spacing: 4
+
+            BoxLayout:
+                orientation: 'horizontal'
+                size_hint_y: 0.30
+                spacing: 5
+                
+                RenkliKart:
+                    bg_color: 26/255, 34/255, 56/255, 1
+                    orientation: 'vertical'
+                    padding: 5
+                    spacing: 3
+                    TextInput:
+                        id: input_wno
+                        hint_text: "Weld No"
+                    TextInput:
+                        id: input_wtype
+                        hint_text: "Type (BW/SW)"
+                    TextInput:
+                        id: input_fdate
+                        hint_text: "FitUp Date"
+                    TextInput:
+                        id: input_wdate
+                        hint_text: "Weld Date"
+                    TextInput:
+                        id: input_tpress
+                        hint_text: "Test Press"
+                    TextInput:
+                        id: input_spec
+                        hint_text: "Spec"
+                    Button:
+                        text: "KAYNAK EKLE"
+                        background_normal: ''
+                        background_color: 41/255, 128/255, 185/255, 1
+                        bold: True
+                        size_hint_y: 0.3
+                        on_press: root.weld_ekle_click()
+
+                RenkliKart:
+                    bg_color: 26/255, 34/255, 56/255, 1
+                    orientation: 'vertical'
+                    padding: 5
+                    spacing: 3
+                    TextInput:
+                        id: input_ptype
+                        hint_text: "Punch Tipi (A/B)"
+                    TextInput:
+                        id: input_pdesc
+                        hint_text: "Açıklama"
+                    TextInput:
+                        id: input_punch_kapat_id
+                        hint_text: "Kapatılacak ID"
+                    BoxLayout:
+                        orientation: 'horizontal'
+                        spacing: 3
+                        Button:
+                            text: "PUNCH AÇ"
+                            background_normal: ''
+                            background_color: 192/255, 41/255, 43/255, 1
+                            bold: True
+                            on_press: root.punch_ekle_click()
+                        Button:
+                            text: "KAPAT"
+                            background_normal: ''
+                            background_color: 39/255, 174/255, 96/255, 1
+                            bold: True
+                            on_press: root.punch_kapat_click()
+
+            ScrollView:
+                size_hint_y: 0.20
+                RenkliKart:
+                    bg_color: 26/255, 34/255, 56/255, 1
+                    size_hint_y: None
+                    height: self.minimum_height
+                    padding: 5
+                    Label:
+                        id: lbl_weld_liste
+                        text: "Lütfen yukarıdan bir hat seçip işlem yapın..."
+                        size_hint_y: None
+                        halign: 'left'
+                        valign: 'top'
+                        font_size: '12sp'
+                        text_size: self.width, None
+""")
+
+# --- UYGULAMA YÖNETİCİSİ ---
+class PipingQAQCApp(App):
+    secili_proje_id = None
+    secili_proje_adi = None
+    secili_line_no = None
+    is_admin = False # Kullanıcının admin olup olmadığını saklayan değişken
+
+    def build(self):
+        sm = ScreenManager()
+        # Uygulama açılış ekranını Login yapıyoruz
+        sm.add_widget(LoginScreen(name='login'))
+        sm.add_widget(MainMenuScreen(name='ana_menu'))
+        sm.add_widget(ProjectListScreen(name='proje_liste'))
+        sm.add_widget(HatYonetimScreen(name='hat_yonetim'))
+        return sm
+
+if __name__ == "__main__":
+    try:
+        PipingQAQCApp().run()
+    except Exception as e:
+        import traceback
+        from kivy.uix.popup import Popup
+        from kivy.uix.textinput import TextInput
+        
+        hata_mesaji = traceback.format_exc()
+        kutu = TextInput(text=hata_mesaji, readonly=True, font_size='14sp')
+        pencere = Popup(title='⚠️ KRİTİK UYGULAMA HATASI', content=kutu, size_hint=(0.9, 0.9))
+        pencere.open()
+        
+        from kivy.base import runTouchApp
+        runTouchApp(pencere)
